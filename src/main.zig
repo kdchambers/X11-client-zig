@@ -2,6 +2,7 @@ const std = @import("std");
 const x11 = @cImport({
     @cInclude("X11/Xlib.h");
     @cInclude("X11/Xutil.h");
+    @cInclude("X11/Xatom.h");
 });
 
 var close_requested: bool = false;
@@ -106,6 +107,8 @@ inline fn keysymToChar(keysym: x11.KeySym, shift: bool) ?u8 {
 var shift_mod_left: bool = false;
 var shift_mod_right: bool = false;
 
+const text_to_paste: [*:0]const u8 = "Hello, clipboard world!";
+
 pub fn main() !void {
     var display: *x11.Display = x11.XOpenDisplay(null) orelse {
         std.log.err("Failed to open X11 display", .{});
@@ -133,6 +136,10 @@ pub fn main() !void {
     _ = x11.XSetWMProtocols(display, window, &wm_delete_window, 1);
 
     _ = x11.XSetStandardProperties(display, window, "X11 Client in Zig", "X11 client", x11.None, null, 0, null);
+
+    const clipboard_atom = x11.XInternAtom(display, "CLIPBOARD", x11.True);
+    const targets_atom = x11.XInternAtom(display, "TARGETS", x11.True);
+    const utf8_string_atom = x11.XInternAtom(display, "UTF8_STRING", x11.True);
 
     // Available masks:
     //   KeyPress,
@@ -175,6 +182,10 @@ pub fn main() !void {
 
                 if (keysymToChar(keysym, shift_mod_left or shift_mod_right)) |ch| {
                     std.log.info("Pressed: {c}", .{ch});
+                    if (keysym == ' ') {
+                        std.log.info("Copy simulated", .{});
+                        _ = x11.XSetSelectionOwner(display, clipboard_atom, window, x11.CurrentTime);
+                    }
                 }
             },
             x11.KeyRelease => {
@@ -222,7 +233,57 @@ pub fn main() !void {
             x11.CirculateRequest => std.log.info("XEvent: CirculateRequest", .{}),
             x11.PropertyNotify => std.log.info("XEvent: PropertyNotify", .{}),
             x11.SelectionClear => std.log.info("XEvent: SelectionClear", .{}),
-            x11.SelectionRequest => std.log.info("XEvent: SelectionRequest", .{}),
+            x11.SelectionRequest => {
+                std.log.info("XEvent: SelectionRequest", .{});
+                const selection_request_event: *x11.XSelectionRequestEvent = @ptrCast(&event);
+                const selection_owner = x11.XGetSelectionOwner(display, clipboard_atom);
+                if (selection_owner == window and selection_request_event.selection == clipboard_atom) {
+                    if (selection_request_event.target == utf8_string_atom) {
+                        //
+                        // Client is requesting the selection in utf8
+                        //
+                        _ = x11.XChangeProperty(
+                            selection_request_event.display,
+                            selection_request_event.requestor,
+                            selection_request_event.property,
+                            selection_request_event.target,
+                            8,
+                            x11.PropModeReplace,
+                            text_to_paste,
+                            @intCast(std.mem.len(text_to_paste)),
+                        );
+                        std.log.info("Text sent to client", .{});
+                    } else if (selection_request_event.target == targets_atom) {
+                        //
+                        // Client is requesting the supported targets for the selection (Clipboard)
+                        //
+                        _ = x11.XChangeProperty(
+                            selection_request_event.display,
+                            selection_request_event.requestor,
+                            selection_request_event.property,
+                            x11.XA_ATOM,
+                            32,
+                            x11.PropModeReplace,
+                            @ptrCast(&utf8_string_atom),
+                            1,
+                        );
+                        std.log.info("Supported formats for selection sent to client", .{});
+                    }
+                    var response_event = x11.XSelectionEvent{
+                        .type = x11.SelectionNotify,
+                        .serial = selection_request_event.serial,
+                        .send_event = selection_request_event.send_event,
+                        .display = selection_request_event.display,
+                        .requestor = selection_request_event.requestor,
+                        .selection = selection_request_event.selection,
+                        .target = selection_request_event.target,
+                        .property = selection_request_event.property,
+                        .time = selection_request_event.time,
+                    };
+
+                    _ = x11.XSendEvent(display, selection_request_event.requestor, 0, 0, @ptrCast(&response_event));
+                }
+            },
             x11.SelectionNotify => std.log.info("XEvent: SelectionNotify", .{}),
             x11.ColormapNotify => std.log.info("XEvent: ColormapNotify", .{}),
             x11.MappingNotify => std.log.info("XEvent: MappingNotify", .{}),

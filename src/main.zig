@@ -3,6 +3,7 @@ const x11 = @cImport({
     @cInclude("X11/Xlib.h");
     @cInclude("X11/Xutil.h");
     @cInclude("X11/Xatom.h");
+    @cInclude("limits.h");
 });
 
 var close_requested: bool = false;
@@ -106,6 +107,7 @@ inline fn keysymToChar(keysym: x11.KeySym, shift: bool) ?u8 {
 
 var shift_mod_left: bool = false;
 var shift_mod_right: bool = false;
+var ctrl_mod_left: bool = false;
 
 const text_to_paste: [*:0]const u8 = "Hello, clipboard world!";
 
@@ -140,6 +142,7 @@ pub fn main() !void {
     const clipboard_atom = x11.XInternAtom(display, "CLIPBOARD", x11.True);
     const targets_atom = x11.XInternAtom(display, "TARGETS", x11.True);
     const utf8_string_atom = x11.XInternAtom(display, "UTF8_STRING", x11.True);
+    var target: x11.Atom = x11.None;
 
     // Available masks:
     //   KeyPress,
@@ -170,6 +173,11 @@ pub fn main() !void {
                 const keypress_event: *x11.XKeyEvent = @ptrCast(&event);
                 const keysym: x11.KeySym = x11.XLookupKeysym(keypress_event, 0);
 
+                if (keysym == x11.XK_Control_L) {
+                    ctrl_mod_left = true;
+                    continue;
+                }
+
                 if (keysym == x11.XK_Shift_L) {
                     shift_mod_left = true;
                     continue;
@@ -182,15 +190,24 @@ pub fn main() !void {
 
                 if (keysymToChar(keysym, shift_mod_left or shift_mod_right)) |ch| {
                     std.log.info("Pressed: {c}", .{ch});
-                    if (keysym == ' ') {
+                    if (keysym == 'c' and ctrl_mod_left) {
                         std.log.info("Copy simulated", .{});
                         _ = x11.XSetSelectionOwner(display, clipboard_atom, window, x11.CurrentTime);
+                    }
+                    if (keysym == 'v' and ctrl_mod_left) {
+                        std.log.info("Paste simulated", .{});
+                        _ = x11.XConvertSelection(display, clipboard_atom, targets_atom, clipboard_atom, window, x11.CurrentTime);
                     }
                 }
             },
             x11.KeyRelease => {
                 const keypress_event: *x11.XKeyEvent = @ptrCast(&event);
                 const keysym: x11.KeySym = x11.XLookupKeysym(keypress_event, 0);
+
+                if (keysym == x11.XK_Control_L) {
+                    ctrl_mod_left = false;
+                    continue;
+                }
 
                 if (keysym == x11.XK_Shift_L) {
                     shift_mod_left = false;
@@ -284,7 +301,53 @@ pub fn main() !void {
                     _ = x11.XSendEvent(display, selection_request_event.requestor, 0, 0, @ptrCast(&response_event));
                 }
             },
-            x11.SelectionNotify => std.log.info("XEvent: SelectionNotify", .{}),
+            x11.SelectionNotify => {
+                std.log.info("XEvent: SelectionNotify", .{});
+
+                const selection_notify_event: *x11.XSelectionEvent = @ptrCast(&event);
+                if (selection_notify_event.property == x11.None)
+                    break;
+
+                var actual_type: x11.Atom = undefined;
+                var actual_format: c_int = undefined;
+                var bytes_after: c_ulong = undefined;
+                var data: ?[*:0]u8 = undefined;
+                var count: c_ulong = undefined;
+
+                _ = x11.XGetWindowProperty(
+                    display,
+                    window,
+                    clipboard_atom,
+                    0,
+                    x11.LONG_MAX,
+                    x11.False,
+                    x11.AnyPropertyType,
+                    &actual_type,
+                    &actual_format,
+                    &count,
+                    &bytes_after,
+                    &data,
+                );
+
+                if (selection_notify_event.target == targets_atom) {
+                    var list: [*]x11.Atom = @ptrCast(@alignCast(data.?));
+                    for (list[0..count]) |item| {
+                        if (item == x11.XA_STRING) {
+                            target = x11.XA_STRING;
+                        } else if (item == utf8_string_atom) {
+                            target = utf8_string_atom;
+                            break;
+                        }
+                    }
+                    if (target != x11.None) {
+                        _ = x11.XConvertSelection(display, clipboard_atom, target, clipboard_atom, window, x11.CurrentTime);
+                    }
+                } else if (selection_notify_event.target == target) {
+                    std.log.info("Pasted text: {s}", .{data.?[0..count]});
+                }
+
+                _ = x11.XFree(data.?);
+            },
             x11.ColormapNotify => std.log.info("XEvent: ColormapNotify", .{}),
             x11.MappingNotify => std.log.info("XEvent: MappingNotify", .{}),
             x11.GenericEvent => std.log.info("XEvent: GenericEvent", .{}),
